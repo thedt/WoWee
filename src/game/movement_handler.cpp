@@ -3,6 +3,7 @@
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/spline_packet.hpp"
+#include "game/npc_spline_locomotion.hpp"
 #include "game/transport_manager.hpp"
 #include "game/entity.hpp"
 #include "network/world_socket.hpp"
@@ -24,6 +25,40 @@ namespace wowee {
 namespace game {
 
 namespace {
+
+glm::vec3 splinePoint(const glm::vec3& point) { return point; }
+glm::vec3 splinePoint(const MonsterMoveData::Point& point) { return {point.x, point.y, point.z}; }
+
+template <typename PointRange>
+void setNpcSplineWalkingHint(Entity& entity, uint32_t flags, uint32_t duration,
+                             const glm::vec3& start, const PointRange& waypoints,
+                             const glm::vec3& destination) {
+    if (!isActiveExpansion("wotlk") || entity.getType() != ObjectType::UNIT ||
+        !entity.isActivelyMoving()) return;
+
+    // These paths do not describe ordinary ground locomotion. In particular,
+    // cyclic paths may have synthetic points, and flying/parabolic paths have
+    // their own animation semantics.
+    constexpr uint32_t kNonGround = SplineFlagWotlk::FALLING | SplineFlagWotlk::PARABOLIC |
+        SplineFlagWotlk::FLYING | SplineFlagWotlk::CYCLIC | SplineFlagWotlk::ENTER_CYCLE |
+        SplineFlagWotlk::ANIMATION | SplineFlagWotlk::FROZEN;
+    if (flags & kNonGround) return;
+
+    // Use every point, not just the start-to-destination chord: an NPC can
+    // travel a long path and finish close to where it started. For smooth
+    // splines this polyline is an approximation of the curve length.
+    float pathLength = 0.0f;
+    glm::vec3 previous = start;
+    for (const auto& point : waypoints) {
+        const glm::vec3 current = splinePoint(point);
+        pathLength += glm::distance(previous, current);
+        previous = current;
+    }
+    pathLength += glm::distance(previous, destination);
+    const auto& unit = static_cast<const Unit&>(entity);
+    entity.setSplineWalkingHint(npcSplineWalkingHint(pathLength, duration,
+                                                    unit.getWalkSpeed(), unit.getRunSpeed()));
+}
 
 struct KnownAreaTriggerDestination {
     uint32_t triggerId;
@@ -114,11 +149,16 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
 
     // Spline move: synth flags (each opcode produces different flags)
     {
-        auto makeSynthHandler = [this](uint32_t synthFlags, uint32_t mask) {
-            return [this, synthFlags, mask](network::Packet& packet) {
+        auto makeSynthHandler = [this](uint32_t synthFlags, uint32_t mask, bool clearWalkHint = false) {
+            return [this, synthFlags, mask, clearWalkHint](network::Packet& packet) {
                 if (!packet.hasRemaining(1)) return;
                 uint64_t guid = packet.readPackedGuid();
-                if (guid == 0 || guid == owner_.getPlayerGuid() || !owner_.unitMoveFlagsCallbackRef()) return;
+                if (guid == 0 || guid == owner_.getPlayerGuid()) return;
+                if (clearWalkHint) {
+                    if (auto entity = owner_.getEntityManager().getEntity(guid))
+                        entity->clearSplineWalkingHint();
+                }
+                if (!owner_.unitMoveFlagsCallbackRef()) return;
                 owner_.unitMoveFlagsCallbackRef()(guid, synthFlags, mask);
             };
         };
@@ -133,11 +173,11 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
             asFlag(MovementFlags::CAN_FLY) | asFlag(MovementFlags::FLYING);
 
         table[Opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE] =
-            makeSynthHandler(kWalkBit, kWalkBit);
+            makeSynthHandler(kWalkBit, kWalkBit, true);
         // Run mode says the unit is not walking. It says nothing about
         // swimming or flying, and clearing those took the flight animation off
         // anything that started moving.
-        table[Opcode::SMSG_SPLINE_MOVE_SET_RUN_MODE]  = makeSynthHandler(0u, kWalkBit);
+        table[Opcode::SMSG_SPLINE_MOVE_SET_RUN_MODE]  = makeSynthHandler(0u, kWalkBit, true);
         // CAN_FLY because that is what the opcode means - AzerothCore sends it
         // from Unit::SetCanFly for units the client does not control - and
         // FLYING because that is the flag the animation reads.
@@ -153,17 +193,24 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
 
     // Spline speed: all opcodes share the same PackedGuid+float format, differing
     // only in which member receives the value. Factory avoids 8 copy-pasted lambdas.
-    auto makeSplineSpeedHandler = [this](float MovementHandler::* member) {
-        return [this, member](network::Packet& packet) {
+    auto makeSplineSpeedHandler = [this](float MovementHandler::* member,
+                                         void (Unit::*creatureSetter)(float) = nullptr) {
+        return [this, member, creatureSetter](network::Packet& packet) {
             if (!packet.hasRemaining(5)) return;
             uint64_t guid = packet.readPackedGuid();
             if (!packet.hasRemaining(4)) return;
             float speed = packet.readFloat();
-            if (guid == owner_.getPlayerGuid() && std::isfinite(speed) && speed > 0.01f && speed < 200.0f)
+            if (!std::isfinite(speed) || speed <= 0.01f || speed >= 200.0f) return;
+            if (guid == owner_.getPlayerGuid()) {
                 this->*member = speed;
+            } else if (creatureSetter) {
+                auto entity = owner_.getEntityManager().getEntity(guid);
+                if (entity && entity->getType() == ObjectType::UNIT)
+                    (static_cast<Unit&>(*entity).*creatureSetter)(speed);
+            }
         };
     };
-    table[Opcode::SMSG_SPLINE_SET_RUN_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverRunSpeed_);
+    table[Opcode::SMSG_SPLINE_SET_RUN_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverRunSpeed_, &Unit::setRunSpeed);
     table[Opcode::SMSG_SPLINE_SET_RUN_BACK_SPEED]  = makeSplineSpeedHandler(&MovementHandler::serverRunBackSpeed_);
     table[Opcode::SMSG_SPLINE_SET_SWIM_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverSwimSpeed_);
 
@@ -311,7 +358,7 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_SPLINE_SET_FLIGHT_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverFlightSpeed_);
     table[Opcode::SMSG_SPLINE_SET_FLIGHT_BACK_SPEED]  = makeSplineSpeedHandler(&MovementHandler::serverFlightBackSpeed_);
     table[Opcode::SMSG_SPLINE_SET_SWIM_BACK_SPEED]    = makeSplineSpeedHandler(&MovementHandler::serverSwimBackSpeed_);
-    table[Opcode::SMSG_SPLINE_SET_WALK_SPEED]          = makeSplineSpeedHandler(&MovementHandler::serverWalkSpeed_);
+    table[Opcode::SMSG_SPLINE_SET_WALK_SPEED]          = makeSplineSpeedHandler(&MovementHandler::serverWalkSpeed_, &Unit::setWalkSpeed);
     table[Opcode::SMSG_SPLINE_SET_TURN_RATE]           = makeSplineSpeedHandler(&MovementHandler::serverTurnRate_);
     // Pitch rate not stored locally - consume packet to keep stream aligned.
     table[Opcode::SMSG_SPLINE_SET_PITCH_RATE] = [](network::Packet& packet) { packet.skipAll(); };
@@ -1718,6 +1765,10 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
                                 orientation, data.duration / 1000.0f);
         }
 
+        setNpcSplineWalkingHint(*entity, data.splineFlags, data.duration,
+                                glm::vec3(data.x, data.y, data.z), data.waypoints,
+                                glm::vec3(data.destX, data.destY, data.destZ));
+
         if (owner_.creatureMoveCallbackRef()) {
             owner_.creatureMoveCallbackRef()(data.guid,
                 destCanonical.x, destCanonical.y, destCanonical.z,
@@ -1870,6 +1921,10 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
 
         owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, destLocalCanonical, false, 0.0f);
         entity->startMoveTo(destWorld.x, destWorld.y, destWorld.z, facingAngle, duration / 1000.0f);
+
+        setNpcSplineWalkingHint(*entity, splineFlags, duration,
+                                glm::vec3(localX, localY, localZ), spline.waypoints,
+                                glm::vec3(destLocalX, destLocalY, destLocalZ));
 
         if (entity->getType() == ObjectType::UNIT && owner_.creatureMoveCallbackRef())
             owner_.creatureMoveCallbackRef()(moverGuid, destWorld.x, destWorld.y, destWorld.z, duration);

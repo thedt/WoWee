@@ -2682,6 +2682,7 @@ if(NOT ANDROID)
     target_link_directories(test_game_replay PRIVATE
         $<TARGET_PROPERTY:wowee,LINK_DIRECTORIES>)
     target_sources(test_game_replay PRIVATE test_game_replay_item_push.cpp)
+    target_sources(test_game_replay PRIVATE test_game_replay_npc_movement.cpp)
     target_link_options(test_game_replay PRIVATE
         $<TARGET_PROPERTY:wowee,LINK_OPTIONS>)
     target_sources(test_game_replay PRIVATE test_game_replay_cast_guids.cpp)

@@ -1,6 +1,8 @@
 // Entity, Unit, Player, GameObject, EntityManager tests
 #include <catch_amalgamated.hpp>
 #include "game/entity.hpp"
+#include "game/npc_spline_locomotion.hpp"
+#include "core/creature_locomotion.hpp"
 #include <algorithm>
 #include <memory>
 
@@ -52,6 +54,71 @@ TEST_CASE("Entity still interpolates meaningful movement", "[entity][movement]")
     e.updateMovement(0.5f);
     REQUIRE(e.getX() == Catch::Approx(2.5f));
     REQUIRE(e.isActivelyMoving());
+}
+
+TEST_CASE("NPC spline walk hints are temporary and do not change movement mode", "[entity][movement][npc]") {
+    Entity e;
+    e.startMoveTo(10.0f, 0.0f, 0.0f, 0.0f, 4.0f);
+    e.setSplineWalkingHint(true);
+    CHECK(e.walkingForAnimation(false));
+    e.updateMovement(4.0f);
+    CHECK_FALSE(e.walkingForAnimation(false));
+
+    e.startMoveTo(20.0f, 0.0f, 0.0f, 0.0f, 2.0f);
+    CHECK_FALSE(e.walkingForAnimation(false));
+    CHECK(e.walkingForAnimation(true));
+    e.setSplineWalkingHint(false);
+    CHECK_FALSE(e.walkingForAnimation(true));
+    e.clearSplineWalkingHint();
+    CHECK(e.walkingForAnimation(true));
+    e.setSplineWalkingHint(true);
+    e.setPosition(20.0f, 0.0f, 0.0f, 0.0f);
+    e.startMoveTo(21.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+    CHECK_FALSE(e.walkingForAnimation(false));
+}
+
+TEST_CASE("NPC ground spline speed is compared with that creature's speeds", "[entity][movement][npc]") {
+    REQUIRE(npcSplineWalkingHint(10.0f, 4000, 2.5f, 7.0f) == true);
+    REQUIRE(npcSplineWalkingHint(10.0f, 1429, 2.5f, 7.0f) == false);
+    // A custom faster creature: an absolute 4.5-yard threshold would be wrong.
+    REQUIRE(npcSplineWalkingHint(10.0f, 2000, 5.0f, 14.0f) == true);
+    REQUIRE(npcSplineWalkingHint(10.0f, 3636, 2.5f, 7.0f) == true); // 10% path error
+    REQUIRE(npcSplineWalkingHint(10.0f, 1299, 2.5f, 7.0f) == false);
+    // Custom spline velocities and overlapping speed ranges are ambiguous.
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 10000, 2.5f, 7.0f).has_value());
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 2105, 2.5f, 7.0f).has_value());
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 500, 2.5f, 7.0f).has_value());
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 1818, 5.0f, 6.0f).has_value());
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 0, 2.5f, 7.0f));
+    CHECK_FALSE(npcSplineWalkingHint(0.0f, 4000, 2.5f, 7.0f));
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 4000, 0.0f, 7.0f));
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 4000, 7.0f, 7.0f));
+    CHECK_FALSE(npcSplineWalkingHint(10.0f, 4000, NAN, 7.0f));
+    CHECK_FALSE(npcSplineWalkingHint(INFINITY, 4000, 2.5f, 7.0f));
+    CHECK_FALSE(npcSplineWalkingHint(1000.0f, 1, 2.5f, 7.0f));
+}
+
+TEST_CASE("NPC flying and swimming animations take priority over walk hints", "[entity][movement][npc]") {
+    using wowee::core::movingCreatureAnimation;
+    using namespace wowee::rendering::anim;
+    CHECK(movingCreatureAnimation(false, false, true) == WALK);
+    CHECK(movingCreatureAnimation(false, false, false) == RUN);
+    CHECK(movingCreatureAnimation(false, true, true) == SWIM);
+    CHECK(movingCreatureAnimation(true, true, true) == FLY_FORWARD);
+}
+
+TEST_CASE("NPCs use the available ground animation when one is missing", "[entity][movement][npc]") {
+    using wowee::core::supportedCreatureAnimation;
+    using namespace wowee::rendering::anim;
+    const auto onlyRun = [](uint32_t id) { return id == RUN; };
+    const auto onlyWalk = [](uint32_t id) { return id == WALK; };
+    const auto neither = [](uint32_t) { return false; };
+    CHECK(supportedCreatureAnimation(WALK, onlyRun) == RUN);
+    CHECK(supportedCreatureAnimation(RUN, onlyWalk) == WALK);
+    CHECK(supportedCreatureAnimation(WALK, onlyWalk) == WALK);
+    CHECK(supportedCreatureAnimation(RUN, onlyRun) == RUN);
+    CHECK(supportedCreatureAnimation(WALK, neither) == WALK);
+    CHECK(supportedCreatureAnimation(SWIM, onlyRun) == SWIM);
 }
 
 TEST_CASE("Entity field set/get/has", "[entity]") {

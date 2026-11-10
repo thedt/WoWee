@@ -5,6 +5,7 @@
 #include "ui/settings_schema.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "core/coordinates.hpp"
+#include "core/creature_locomotion.hpp"
 #include "ui/minimap_projection.hpp"
 #include "core/profiler.hpp"
 #include "core/npc_interaction_callback_handler.hpp"
@@ -3475,12 +3476,13 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                 posIt->second = renderPos;
 
                 // Drive movement animation: Walk/Run/Swim (4/5/42) when moving,
-                // Stand/SwimIdle (0/41) when idle. Walk(4) selected when WALKING flag is set.
+                // Stand/SwimIdle (0/41) when idle. Wrath splines may provide a
+                // temporary walk/run hint even when the WALKING flag is absent.
                 // WoW M2 animation IDs: 4=Walk, 5=Run, 41=SwimIdle, 42=Swim.
                 // Only switch on transitions to avoid resetting animation time.
                 // Don't override Death (1) animation.
                 const bool isSwimmingNow = _creatureSwimmingState.count(guid) > 0;
-                const bool isWalkingNow  = _creatureWalkingState.count(guid) > 0;
+                const bool isWalkingNow  = entity->walkingForAnimation(_creatureWalkingState.count(guid) > 0);
                 const bool isFlyingNow   = _creatureFlyingState.count(guid) > 0;
                 bool prevMoving   = _creatureWasMoving[guid];
                 bool prevSwimming = _creatureWasSwimming[guid];
@@ -3503,10 +3505,9 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {
                     if (!gotState || curAnimId != rendering::anim::DEATH) {
                         uint32_t targetAnim;
                         if (isMovingNow) {
-                            if (isFlyingNow)        targetAnim = rendering::anim::FLY_FORWARD;
-                            else if (isSwimmingNow) targetAnim = rendering::anim::SWIM;
-                            else if (isWalkingNow)  targetAnim = rendering::anim::WALK;
-                            else                    targetAnim = rendering::anim::RUN;
+                            targetAnim = supportedCreatureAnimation(
+                                movingCreatureAnimation(isFlyingNow, isSwimmingNow, isWalkingNow),
+                                [&](uint32_t anim) { return charRenderer->hasAnimation(instanceId, anim); });
                         } else {
                             if (isFlyingNow)        targetAnim = rendering::anim::FLY_IDLE;
                             else if (isSwimmingNow) targetAnim = rendering::anim::SWIM_IDLE;

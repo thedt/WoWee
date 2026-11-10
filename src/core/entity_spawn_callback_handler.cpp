@@ -1,6 +1,7 @@
 #include "core/entity_spawn_callback_handler.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/coordinates.hpp"
+#include "core/creature_locomotion.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/character_renderer.hpp"
@@ -147,10 +148,9 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
                 float durationSec = static_cast<float>(durationMs) / 1000.0f;
                 renderer_.getCharacterRenderer()->moveInstanceTo(instanceId, renderPos, durationSec);
             }
-            // Play the server-selected ground locomotion animation for the
-            // duration of the spline move. Monster patrols report Walk through
-            // SMSG_MONSTER_MOVE's spline flags before this callback runs.
-            // WoW M2 animation IDs: 4=Walk, 5=Run.
+            // The entity carries an optional, spline-scoped visual hint. Wrath
+            // patrols can walk without a walk-mode opcode; the hint is based on
+            // path speed and leaves the actual movement flags untouched.
             // Don't override Death animation (1). The per-frame sync loop will return to
             // Stand when movement stops.
             if (durationMs > 0) {
@@ -158,16 +158,26 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
                 // don't reset it here or every server movement packet restarts the
                 // run cycle from frame 0, causing visible stutter.
                 if (!isPlayer) {
+                    auto entity = gameHandler_.getEntityManager().getEntity(guid);
+                    if (!entity || !entity->isActivelyMoving()) return;
                     uint32_t curAnimId = 0; float curT = 0.0f, curDur = 0.0f;
                     auto* cr = renderer_.getCharacterRenderer();
                     bool gotState = cr->getAnimationState(instanceId, curAnimId, curT, curDur);
-                    const bool walking = entitySpawner_.getCreatureWalkingState().count(guid) > 0;
-                    const uint32_t targetAnim = walking ? rendering::anim::WALK : rendering::anim::RUN;
+                    const bool walking = entity->walkingForAnimation(
+                        entitySpawner_.getCreatureWalkingState().count(guid) > 0);
+                    const bool swimming = entitySpawner_.getCreatureSwimmingState().count(guid) > 0;
+                    const bool flying = entitySpawner_.getCreatureFlyingState().count(guid) > 0;
+                    const uint32_t targetAnim = supportedCreatureAnimation(
+                        movingCreatureAnimation(flying, swimming, walking),
+                        [&](uint32_t anim) { return cr->hasAnimation(instanceId, anim); });
                     // Only restart when the selected locomotion animation changed.
                     if (!gotState || (curAnimId != rendering::anim::DEATH && curAnimId != targetAnim)) {
                         cr->playAnimation(instanceId, targetAnim, /*loop=*/true);
                     }
                     entitySpawner_.getCreatureWasMoving()[guid] = true;
+                    entitySpawner_.getCreatureWasWalking()[guid] = walking;
+                    entitySpawner_.getCreatureWasSwimming()[guid] = swimming;
+                    entitySpawner_.getCreatureWasFlying()[guid] = flying;
                 }
             }
         }

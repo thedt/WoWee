@@ -121,10 +121,12 @@ public:
         isMoving_ = false; // Instant position set cancels interpolation
         usePathMode_ = false;
         activeSpline_.reset();
+        splineWalkingHint_.reset();
     }
 
     // Multi-segment path movement (Catmull-Rom spline interpolation)
     void startMoveAlongPath(const std::vector<std::array<float, 3>>& path, float destO, float totalDuration) {
+        splineWalkingHint_.reset();
         if (path.empty()) return;
         if (path.size() == 1 || totalDuration <= 0.0f) {
             startMoveTo(path.back()[0], path.back()[1], path.back()[2], destO, totalDuration);
@@ -181,6 +183,7 @@ public:
 
     // Movement interpolation (syncs entity position with renderer during movement)
     void startMoveTo(float destX, float destY, float destZ, float destO, float durationSec) {
+        splineWalkingHint_.reset();
         usePathMode_ = false;
         activeSpline_.reset();
         if (durationSec <= 0.0f) {
@@ -281,6 +284,15 @@ public:
         return isMoving_ && moveElapsed_ < moveDuration_;
     }
 
+    // A visual hint for the current server spline only. It must not replace the
+    // movement flags, or leak into later heartbeats, stops, or position updates.
+    void setSplineWalkingHint(std::optional<bool> walking) { splineWalkingHint_ = walking; }
+    void clearSplineWalkingHint() { splineWalkingHint_.reset(); }
+    [[nodiscard]] bool walkingForAnimation(bool movementFlagWalking) const {
+        return isActivelyMoving() ? splineWalkingHint_.value_or(movementFlagWalking)
+                                  : movementFlagWalking;
+    }
+
     // Returns the latest server-authoritative position: destination if moving, current if not.
     // Unlike getX/Y/Z (which only update via updateMovement), this always reflects the
     // last known server position regardless of distance culling.
@@ -336,6 +348,7 @@ protected:
     float velX_ = 0, velY_ = 0, velZ_ = 0;  // Smoothed velocity for dead reckoning
     // CatmullRom spline for multi-segment path movement (replaces linear pathPoints_/pathSegDists_)
     std::optional<math::CatmullRomSpline> activeSpline_;
+    std::optional<bool> splineWalkingHint_;
     uint32_t splineDurationMs_ = 0;
 };
 
@@ -346,6 +359,17 @@ class Unit : public Entity {
 public:
     Unit() { type = ObjectType::UNIT; }
     explicit Unit(uint64_t guid) : Entity(guid) { type = ObjectType::UNIT; }
+
+    // Speeds advertised for this creature, not the local player's speeds.
+    // Zero means unknown; invalid updates leave the last good value intact.
+    void setWalkSpeed(float speed) {
+        if (std::isfinite(speed) && speed > 0.01f && speed < 200.0f) walkSpeed_ = speed;
+    }
+    void setRunSpeed(float speed) {
+        if (std::isfinite(speed) && speed > 0.01f && speed < 200.0f) runSpeed_ = speed;
+    }
+    [[nodiscard]] float getWalkSpeed() const { return walkSpeed_; }
+    [[nodiscard]] float getRunSpeed() const { return runSpeed_; }
 
     // Name
     [[nodiscard]] const std::string& getName() const { return name; }
@@ -448,6 +472,8 @@ protected:
     // than inventing reach for a unit whose size has not arrived.
     float combatReach = 0.0f;
     float boundingRadius = 0.0f;
+    float walkSpeed_ = 0.0f;
+    float runSpeed_ = 0.0f;
     uint32_t mountDisplayId = 0;
     uint32_t unitFlags = 0;
     uint8_t visibilityFlags = 0;

@@ -25,6 +25,12 @@ namespace game {
 
 namespace {
 
+void updateCreatureMovementSpeeds(const UpdateBlock& block, const std::shared_ptr<Entity>& entity) {
+    if (!block.hasMovement || entity->getType() != ObjectType::UNIT) return;
+    auto& unit = static_cast<Unit&>(*entity);
+    unit.setWalkSpeed(block.walkSpeed);
+    unit.setRunSpeed(block.runSpeed);
+}
 
 int updateObjectBlocksBudgetPerUpdate(WorldState state) {
     static const int inWorldBudget =
@@ -2557,6 +2563,7 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
 
     // 3a: Create entity from block type
     std::shared_ptr<Entity> entity = createEntityFromBlock(block);
+    updateCreatureMovementSpeeds(block, entity);
 
     // Set position from movement block (server → canonical)
     if (block.hasMovement) {
@@ -2612,6 +2619,8 @@ void EntityController::handleValuesUpdate(const UpdateBlock& block) {
     }
     pendingEvents_.clear();
 
+    updateCreatureMovementSpeeds(block, entity);
+
     // Position update (common)
     if (block.hasMovement) {
         glm::vec3 pos = core::coords::serverToCanonical(glm::vec3(block.x, block.y, block.z));
@@ -2643,6 +2652,7 @@ void EntityController::handleMovementUpdate(const UpdateBlock& block) {
             // Update entity position (server → canonical)
             auto entity = entityManager.getEntity(block.guid);
             if (entity) {
+                updateCreatureMovementSpeeds(block, entity);
                 glm::vec3 pos = core::coords::serverToCanonical(glm::vec3(block.x, block.y, block.z));
                 float oCanonical = core::coords::serverToCanonicalYaw(block.orientation);
                 entity->setPosition(pos.x, pos.y, pos.z, oCanonical);
